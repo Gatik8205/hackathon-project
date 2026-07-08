@@ -1,0 +1,57 @@
+[
+  {
+    "report_id": "RPT001",
+    "phone_number": "+91-9876500001",
+    "device_id": "DEV-A1",
+    "bank_account": "ACC1001",
+    "upi_id": "scammer1@upi",
+    "amount_lost": 250000,
+    "complaint_text": "Caller claimed to be CBI officer, demanded video call, threatened arrest.",
+    "location": "Delhi",
+    "date": "2026-05-01"
+  },
+  {
+    "report_id": "RPT002",
+    "phone_number": "+91-9876500002",
+    "device_id": "DEV-A1",
+    "bank_account": "ACC1002",
+    "upi_id": "scammer1@upi",
+    "amount_lost": 180000,
+    "complaint_text": "Same script — CBI impersonation, parcel with illegal items claim.",
+    "location": "Mumbai",
+    "date": "2026-05-03"
+  },
+  {
+    "report_id": "RPT003",
+    "phone_number": "+91-9876500003",
+    "device_id": "DEV-B2",
+    "bank_account": "ACC1001",
+    "upi_id": "scammer2@upi",
+    "amount_lost": 90000,
+    "complaint_text": "Customs officer impersonation, demanded transfer to 'verification account'.",
+    "location": "Bengaluru",
+    "date": "2026-05-05"
+  },
+  {
+    "report_id": "RPT004",
+    "phone_number": "+91-9876500004",
+    "device_id": "DEV-C3",
+    "bank_account": "ACC1003",
+    "upi_id": "scammer3@upi",
+    "amount_lost": 15000,
+    "complaint_text": "Unrelated OTP fraud, refund pretext.",
+    "location": "Pune",
+    "date": "2026-05-06"
+  },
+  {
+    "report_id": "RPT005",
+    "phone_number": "+91-9876500001",
+    "device_id": "DEV-A1",
+    "bank_account": "ACC1004",
+    "upi_id": "scammer1@upi",
+    "amount_lost": 300000,
+    "complaint_text": "Same phone number and UPI as RPT001, different victim.",
+    "location": "Hyderabad",
+    "date": "2026-05-08"
+  }
+]
