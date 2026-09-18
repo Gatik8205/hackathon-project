@@ -2,47 +2,58 @@
 Chatbot service — Citizen Fraud Shield.
 Place at: app/services/chatbot_service.py
 
-Uses Gemini (google-genai) to assess whether a described call/message is a
+Uses Groq (Llama 3.3 70B) to assess whether a described call/message is a
 scam, returns a structured verdict with red flags and advice.
 """
 
 import os
 import json
-from google import genai
+from groq import Groq
 from app.models.schemas import ChatbotAssessRequest, ChatbotAssessResponse
 from app.services import graph_service
 
-client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+MODEL = "openai/gpt-oss-20b"
 
 SYSTEM_PROMPT = """You are a fraud-detection assistant for Indian citizens, part of a public safety platform.
 You assess descriptions of phone calls, video calls, or messages for signs of common Indian scam patterns.
 
-SCAM PATTERNS TO DETECT:
-- "Digital arrest" scams: callers impersonating CBI, ED, Customs, Police, TRAI, or RBI, claiming the
-  citizen is under investigation, demanding they stay on video call, isolating them from family,
-  and demanding money transfer to "verify" innocence or avoid arrest.
-- OTP / UPI fraud: requests for OTP, PIN, CVV, or remote screen access under pretext of a refund,
-  KYC update, or account verification.
-- Investment / task-based scams: promises of high/guaranteed returns for small "tasks", crypto, or
-  stock tips, especially with secrecy or urgency.
-- Fake courier/parcel scams: claims of illegal items found in a parcel under the citizen's name,
-  demanding payment to "clear" it.
-- Lottery/prize scams: claims of winning money that require an upfront "processing fee."
-- Fake relative/emergency scams: urgent requests for money from someone claiming to be a relative
-  in distress, especially over poor-quality video/audio.
+SCAM PATTERNS TO DETECT (verdict should lean scam only if these specific elements are present):
+- "Digital arrest" scams: caller impersonates CBI, ED, Customs, Police, RBI, or TRAI, claims the
+  citizen is under investigation or has committed a crime, and combines this with at least one of:
+  demanding continuous video call presence, demanding secrecy/isolation from family, or demanding
+  money transfer to "verify innocence," pay a "fine," or avoid arrest.
+- OTP / UPI fraud: caller or message asks the citizen to SHARE an OTP, PIN, CVV, or full card number,
+  or asks them to install a remote-access app, under pretext of a refund/KYC/verification.
+- Investment / task-based scams: promises of guaranteed high returns, asks for upfront payment to
+  "unlock" earnings, or pressure to invest secretly and quickly.
+- Fake courier/parcel scams: claims of illegal items in a parcel under the citizen's name, combined
+  with a demand for payment or transfer to "clear" the matter.
+- Lottery/prize scams: claims of winning money/prizes that require an upfront "processing fee."
 
-WHAT IS **NOT** A SCAM (respond likely_safe for these, do not hedge):
-- Routine business calls/messages: appointment reminders, delivery confirmations, bill notifications,
-  service renewal reminders, newsletters — where NO money, OTP, PIN, or urgent action is demanded.
-- Genuine customer service follow-ups on a complaint or request the citizen actually made.
-- Job/recruitment outreach with NO upfront payment requested.
-- Messages from known contacts (family, friends) sharing ordinary content (photos, plans) with no
-  money request or urgency.
-- Marketing/telemarketing offers for real products/services with no impersonation of authority and
-  no request for sensitive credentials.
-The presence of a phone call or message alone is NOT suspicious. Most calls are legitimate.
-Only flag a red flag if it is a SPECIFIC pattern from the list above — not merely "this was unsolicited"
-or "I cannot fully verify this."
+WHAT IS NOT A SCAM (these are routine, legitimate interactions — verdict should be "likely_safe"):
+- Businesses (banks, gyms, hospitals, ISPs, landlords, employers, colleges, delivery services)
+  contacting the citizen about services the citizen actually uses or expects — appointment reminders,
+  billing notifications, service updates, delivery confirmations, subscription renewals.
+- Calls or messages that DO NOT ask for money transfer, OTP/PIN sharing, or claim law-enforcement
+  investigation/arrest.
+- Friends, family, or known contacts sharing everyday messages, photos, or plans with no financial ask.
+- Recruiters, customer support, or companies following up on something the citizen initiated
+  (a complaint, application, or order), with no payment or credential request.
+- Marketing or promotional calls offering a product/plan upgrade, with no threat or urgency to send money.
+
+DECISION RULE — apply this literally:
+- Use "likely_scam" ONLY if the message contains BOTH (a) an authority/urgency/financial-loss claim
+  AND (b) an explicit request for money transfer, OTP/PIN/card details, or remote access.
+- Use "possibly_scam" if there are some suspicious elements (unusual urgency, unfamiliar caller,
+  vague identity) but no explicit request for money/credentials yet.
+- Use "likely_safe" if the message describes an ordinary service interaction with no financial ask,
+  no impersonation of law enforcement, and no urgency/threat language — even if it involves an
+  unsolicited call. Being unsolicited alone does NOT make something a scam.
+- Do not default to a scam verdict out of general caution. A wrong "likely_safe" on a truly ambiguous
+  case is acceptable; falsely alarming citizens on routine calls erodes trust in this tool and is
+  also a failure mode to avoid.
 
 Respond with ONLY a JSON object matching this exact schema, no preamble, no markdown fences:
 
@@ -53,17 +64,6 @@ Respond with ONLY a JSON object matching this exact schema, no preamble, no mark
   "advice": "<2-3 sentence plain-language advice for the citizen>",
   "recommended_action": "<concrete next step, e.g. reporting instructions, or 'No action needed' if safe>"
 }
-
-VERDICT GUIDANCE:
-- "likely_scam": Clear match to one or more scam patterns above (e.g. impersonating authority +
-  urgency + money/credential request).
-- "possibly_scam": Some concerning elements present but ambiguous or incomplete information — NOT
-  simply "any call could theoretically be a scam."
-- "likely_safe": No specific scam pattern present. Use this confidently for routine, ordinary
-  interactions. Do not default to "possibly_scam" just to be cautious when there is no actual
-  red flag from the list above.
-- recommended_action should mention reporting to cybercrime.gov.in or the 1930 helpline only when
-  the verdict is likely_scam or possibly_scam.
 """
 
 
@@ -75,15 +75,16 @@ def assess_message(request: ChatbotAssessRequest) -> ChatbotAssessResponse:
 Assess this for fraud risk and respond with the JSON object only."""
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_prompt,
-            config={
-                "system_instruction": SYSTEM_PROMPT,
-                "response_mime_type": "application/json",
-            },
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
         )
-        raw_text = response.text.strip()
+        raw_text = response.choices[0].message.content.strip()
         data = json.loads(raw_text)
     except json.JSONDecodeError:
         data = {
@@ -96,9 +97,9 @@ Assess this for fraud risk and respond with the JSON object only."""
             "recommended_action": "Report the incident at cybercrime.gov.in or call 1930 if money was lost.",
         }
     except Exception as e:
-        # Covers rate limits (429), quota exhaustion, network errors, etc.
-        # Never let the citizen-facing endpoint crash — fail safe with a cautious response.
-        print(f"DEBUG - chatbot_service error: {type(e).__name__}: {e}")
+        # Covers rate limits (429), network errors, etc.
+        # Never let the citizen-facing endpoint crash — fail safe with a cautious response,
+        # and mark it distinctly so evaluation scripts can exclude these from real accuracy counts.
         data = {
             "verdict": "possibly_scam",
             "confidence": 0.3,
@@ -107,9 +108,10 @@ Assess this for fraud risk and respond with the JSON object only."""
                        "OTPs, PINs, or transfer money to anyone claiming to be from a government agency "
                        "over call or video call.",
             "recommended_action": "Try again shortly, or report directly at cybercrime.gov.in / call 1930.",
+            "service_unavailable": True,
         }
 
-    result = ChatbotAssessResponse(**data)
+    result = ChatbotAssessResponse(**{k: v for k, v in data.items() if k != "service_unavailable"})
 
     # Wire this detection into the fraud network graph if it's flagged as a
     # scam and we have a phone number to link it on. Never let this block

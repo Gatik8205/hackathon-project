@@ -8,11 +8,13 @@ assigns an alert priority for downstream telecom/MHA-style alerting.
 
 import os
 import json
-from google import genai
+from groq import Groq
 from app.models.schemas import ScamSessionRequest, ScamSessionResponse
 from app.services import graph_service
 
-client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+MODEL = "openai/gpt-oss-20b"
 
 SYSTEM_PROMPT = """You are a real-time scam session classifier for a law-enforcement-facing platform in India.
 Given a transcript or description of an ongoing call/video-call session, determine if it matches
@@ -27,13 +29,21 @@ Known patterns to detect:
 - Uses fear, urgency, and authority-impersonation together
 - Spoofed or suspicious caller ID patterns mentioned by the citizen
 
+WHAT IS NOT A SCAM SESSION (classify as false — routine, legitimate calls):
+- A bank, hospital, ISP, employer, or business following up on a service the citizen actually uses
+  or requested (appointment reminders, complaint follow-ups, interview scheduling, billing updates).
+- No impersonation of law enforcement or government authority.
+- No demand for money transfer, OTP, PIN, or credentials.
+- No urgency, threat, or isolation language.
+Being an unsolicited or unfamiliar call is NOT by itself enough to classify as a scam session.
+
 Respond with ONLY a JSON object, no preamble, no markdown fences:
 
 {
   "is_scam_session": <true|false>,
   "confidence": <float 0-1>,
   "scam_type": "<digital_arrest | otp_fraud | investment_scam | courier_scam | other | null>",
-  "matched_patterns": [<short strings naming which specific patterns were found>],
+  "matched_patterns": [<short strings naming which specific patterns were found, empty list if none>],
   "alert_priority": "low" | "medium" | "high" | "critical"
 }
 
@@ -41,7 +51,7 @@ alert_priority guidance:
 - "critical": active demand for money transfer + impersonation of law enforcement + isolation tactics
 - "high": strong pattern match but no money movement confirmed yet
 - "medium": some suspicious elements, ambiguous
-- "low": minimal or no matching patterns
+- "low": minimal or no matching patterns (use this for legitimate calls, with is_scam_session: false)
 """
 
 
@@ -56,15 +66,16 @@ def classify_session(request: ScamSessionRequest) -> ScamSessionResponse:
     user_prompt = "\n".join(context_lines) + "\n\nClassify this session and respond with the JSON object only."
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_prompt,
-            config={
-                "system_instruction": SYSTEM_PROMPT,
-                "response_mime_type": "application/json",
-            },
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
         )
-        raw_text = response.text.strip()
+        raw_text = response.choices[0].message.content.strip()
         data = json.loads(raw_text)
     except json.JSONDecodeError:
         data = {
@@ -75,7 +86,7 @@ def classify_session(request: ScamSessionRequest) -> ScamSessionResponse:
             "alert_priority": "medium",
         }
     except Exception as e:
-        # Covers rate limits (429), quota exhaustion, network errors, etc.
+        # Covers rate limits (429), network errors, etc.
         # Fail toward caution for a law-enforcement-facing detector.
         data = {
             "is_scam_session": True,
@@ -83,9 +94,10 @@ def classify_session(request: ScamSessionRequest) -> ScamSessionResponse:
             "scam_type": "other",
             "matched_patterns": [f"Classification service temporarily unavailable ({type(e).__name__})"],
             "alert_priority": "medium",
+            "service_unavailable": True,
         }
 
-    result = ScamSessionResponse(**data)
+    result = ScamSessionResponse(**{k: v for k, v in data.items() if k != "service_unavailable"})
 
     if result.is_scam_session and request.caller_number:
         try:
