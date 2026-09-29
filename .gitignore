@@ -1,9 +1,14 @@
 backend/.env
 backend/venv/
 backend/__pycache__/
+backend/app/services/__pycache__/
 
 frontend/node_modules/
 frontend/.next/
 frontend/.env
 
 .vscode/
+fake-currency-dataset
+fake-currency-detection-dataset
+indian-currency-notes
+indian-currency-notes-classifier
