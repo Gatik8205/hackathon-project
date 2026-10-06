@@ -2,29 +2,82 @@
 Counterfeit Currency Identification service.
 Place at: app/services/currency_service.py
 
-NOTE: Genuine counterfeit detection needs a trained CV model on labeled
-genuine/fake note datasets, which is out of scope for a hackathon timeline.
-This is a deliberately honest, lighter-weight version: basic image quality
-and security-feature-region checks using OpenCV, framed clearly as a
-proof-of-concept detector, NOT production-grade currency verification.
-In your deck, be upfront that this demonstrates the pipeline/UX and would
-be swapped for a properly trained model (e.g. fine-tuned CNN on RBI FICN
-sample datasets) in a real deployment.
+Loads the trained MobileNetV2 classifier (currency_classifier_final.pt) and
+runs real inference on uploaded note images. Trained with 5-fold cross-
+validation on a balanced real/fake dataset (133 real, 132 fake — 19 real
+photos + synthetic augmentation, 12 real fake photos + synthetic
+degradation-based augmentation).
+
+Reported cross-validation performance (see training notebook for full
+methodology): 95.47% +/- 2.82% overall accuracy, 91.82% +/- 5.90% real-class
+accuracy, 99.26% +/- 1.48% fake-class accuracy.
+
+NOTE: the fake class includes synthetic degraded images (blur, color shift,
+compression artifacts) since real counterfeit note photos are scarce. This
+is disclosed for transparency — real-world performance on genuine
+counterfeit notes has not been separately validated and may differ.
 """
 
-import cv2
-import numpy as np
+import os
+import io
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from PIL import Image
 from app.models.schemas import CurrencyVerifyResponse
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "currency_classifier_final.pt")
+IMG_SIZE = 224
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+_transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+# Labels match training: 0 = real, 1 = fake
+CLASS_NAMES = ["real", "fake"]
+
+
+def _build_model() -> nn.Module:
+    model = models.mobilenet_v2(weights=None)  # weights loaded from our trained checkpoint, not ImageNet
+    model.classifier[1] = nn.Linear(model.last_channel, 2)
+    return model
+
+
+def _load_model() -> nn.Module:
+    model = _build_model()
+    state_dict = torch.load(MODEL_PATH, map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model
+
+
+# Load once at module import time — avoids reloading the model on every request
+try:
+    _model = _load_model()
+    _model_load_error = None
+except Exception as e:
+    _model = None
+    _model_load_error = str(e)
 
 
 def verify_note(image_bytes: bytes) -> CurrencyVerifyResponse:
-    checks_performed = []
-    flagged_issues = []
+    if _model is None:
+        return CurrencyVerifyResponse(
+            denomination=None,
+            is_likely_genuine=False,
+            confidence=0.0,
+            checks_performed=[],
+            flagged_issues=[f"Model failed to load on server startup: {_model_load_error}"],
+        )
 
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-    if img is None:
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
         return CurrencyVerifyResponse(
             denomination=None,
             is_likely_genuine=False,
@@ -33,29 +86,37 @@ def verify_note(image_bytes: bytes) -> CurrencyVerifyResponse:
             flagged_issues=["Could not read image — please upload a clear, well-lit photo."],
         )
 
-    checks_performed.append("image_quality_check")
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if sharpness < 50:
-        flagged_issues.append("Image is blurry — retake for reliable analysis")
+    checks_performed = ["cnn_authenticity_classification"]
 
-    # Placeholder heuristic checks — illustrate the pipeline stages a real
-    # model would run, without pretending to have genuine/fake ground truth.
-    checks_performed.append("security_thread_region_scan")
-    checks_performed.append("color_consistency_check")
+    input_tensor = _transform(img).unsqueeze(0).to(device)
 
-    mean_color = img.mean(axis=(0, 1))
-    color_variance = float(np.std(mean_color))
-    if color_variance > 60:
-        flagged_issues.append("Unusual color distribution detected — recommend manual verification")
+    with torch.no_grad():
+        outputs = _model(input_tensor)
+        probs = torch.softmax(outputs, dim=1)[0]
+        pred_idx = int(torch.argmax(probs).item())
+        confidence = float(probs[pred_idx].item())
 
-    is_likely_genuine = len(flagged_issues) == 0
-    confidence = 0.55 if is_likely_genuine else 0.4  # intentionally modest — see note above
+    predicted_label = CLASS_NAMES[pred_idx]
+    is_likely_genuine = predicted_label == "real"
+
+    flagged_issues = []
+    if not is_likely_genuine:
+        flagged_issues.append(
+            f"Model classified this note as likely fake (confidence {confidence:.0%}). "
+            "This is a proof-of-concept classifier trained on a small dataset "
+            "(133 real / 132 fake images, partly synthetic) — treat as indicative only "
+            "and verify through official banking channels for anything conclusive."
+        )
+    else:
+        flagged_issues.append(
+            f"No issues flagged (confidence {confidence:.0%}). This is a proof-of-concept "
+            "classifier — not a substitute for RBI-grade verification."
+        )
 
     return CurrencyVerifyResponse(
-        denomination=None,  # denomination classification needs a trained model — not implemented
+        denomination=None,  # denomination classification not covered by this model
         is_likely_genuine=is_likely_genuine,
         confidence=confidence,
         checks_performed=checks_performed,
-        flagged_issues=flagged_issues or ["No obvious issues found — but this is a lightweight heuristic check, not a substitute for RBI-grade verification."],
+        flagged_issues=flagged_issues,
     )

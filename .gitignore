@@ -8,8 +8,6 @@ frontend/.next/
 frontend/.env
 
 .vscode/
-fake-currency-dataset
+staging
 fake-currency-detection-dataset
-indian-currency-notes
-indian-currency-notes-classifier
-indian Currency Real vs Fake Notes Dataset
+indian_currency_notes_fake_vs_real
